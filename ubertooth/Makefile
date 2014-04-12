@@ -1,1 +1,2 @@
-obj-m += main.o
+uberdrv-objs := main.o
+obj-m += uberdrv.o

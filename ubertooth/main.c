@@ -1,8 +1,9 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/usb.h>
+#include <linux/slab.h>
 
-MODULE_LICENSE("Dual BSD/GPL");
+
 
 enum devicetype {
     DEVICE_UBERTOOTH_UNKNOWN  = -1,
@@ -20,9 +21,20 @@ static struct usb_device_id usb_ids[] = {
     {}
 };
 
-MODULE_AUTHOR("Michael Malyshev");
-MODULE_VERSION("1.0");  
 MODULE_DEVICE_TABLE(usb, usb_ids);
+
+struct uber_usb_dev {
+	struct usb_interface* pInterfase;
+	struct usb_device* pDevice;
+	struct usb_endpoint_descriptor *bulk_in_ep;
+	int bulk_in_size;
+	char* bulk_in_buffer;
+	struct usb_endpoint_descriptor *bulk_out_ep;
+	int bulk_out_size;
+	char* bulk_out_buffer;
+
+	struct usb_endpoint_descriptor *ctrl_ep;
+};
 
 
 static inline u16 get_bcdDevice(const struct usb_device *udev)
@@ -66,7 +78,10 @@ static void print_id(struct usb_device *udev)
 
 static int ubertooth_probe(struct usb_interface *intf, const struct usb_device_id *id)
 {
-    int r;
+    int r,i;
+	struct usb_endpoint_descriptor *endpoint;
+	struct uber_usb_dev *dev = NULL;
+    struct usb_host_interface *iface_desc;
     struct usb_device *udev = interface_to_usbdev(intf);
     
     pr_info("### PROBE\n");
@@ -74,18 +89,86 @@ static int ubertooth_probe(struct usb_interface *intf, const struct usb_device_i
     if (id->driver_info == DEVICE_UBERTOOTH_BOOTLOADER) {
         dev_err(&intf->dev, "Bootloader mode not yet supported\n");
         r = -ENODEV;
-        goto error;
+        goto exit;
     } else if (id->driver_info == DEVICE_UBERTOOTH_UNKNOWN) {
         dev_err(&intf->dev, "Model not yet supported\n");
         r = -ENODEV;
-        goto error;
+        goto exit;
     }
         
     print_id(udev);
-    
+
+    dev = kzalloc(sizeof(struct uber_usb_dev), GFP_KERNEL);
+    if (! dev)
+    {
+        dev_err(&intf->dev, "cannot allocate memory for struct uber_usb_dev\n");
+        r = -ENOMEM;
+        goto exit;
+    }	
+
+	dev->pDevice = udev;
+	dev->pInterfase = intf;
+
+	iface_desc = intf->cur_altsetting;
+
+	for (i=0; i < iface_desc->desc.bNumEndpoints; i++)
+	{
+        endpoint = &iface_desc->endpoint[i].desc;
+
+        if (!dev->bulk_in_ep && ((endpoint->bEndpointAddress & USB_ENDPOINT_DIR_MASK) == USB_DIR_IN)
+                && ((endpoint->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) ==
+                    USB_ENDPOINT_XFER_BULK)) {
+            dev->bulk_in_ep = endpoint;	
+			dev->bulk_in_size = endpoint->wMaxPacketSize;
+			dev->bulk_in_buffer = kmalloc(dev->bulk_in_size, GFP_KERNEL);
+			if (dev->bulk_in_buffer == NULL) {
+				dev_err(&intf->dev, "cannot allocate memory for bulk_in_buffer\n");
+				r = -ENOMEM;
+				goto exit;
+			}
+        }
+
+		if (!dev->bulk_out_ep && ((endpoint->bEndpointAddress & USB_ENDPOINT_DIR_MASK) == USB_DIR_OUT)
+				&& ((endpoint->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) ==
+					USB_ENDPOINT_XFER_BULK)) {
+			dev->bulk_out_ep = endpoint; 	
+			dev->bulk_out_size = endpoint->wMaxPacketSize;
+			dev->bulk_out_buffer = kmalloc(dev->bulk_out_size, GFP_KERNEL);
+			if (dev->bulk_out_buffer == NULL) {
+				dev_err(&intf->dev, "cannot allocate memory for bulk_out_buffer\n");
+				r = -ENOMEM;
+				goto exit;
+			}
+		}
+
+	}
+
+	
+	if (dev->bulk_in_ep == NULL || dev->bulk_out_ep == NULL) {
+		dev_err(&intf->dev, "Could not find all EP\n");
+		r = -ENODEV;
+		goto exit;
+	}
+
+	usb_set_intfdata(intf, dev);
+
+	usb_get_dev(udev);
+
+	//usb_register_dev(interface, &ml_class);
+
+	
     return 0;
     
-error:
+exit:
+	if (dev != NULL) {
+		if (dev->bulk_out_buffer != NULL) {
+			kfree(dev->bulk_out_buffer);
+		}
+		if (dev->bulk_in_buffer != NULL) {
+			kfree(dev->bulk_in_buffer);
+		}
+		kfree(dev);
+	}
     return r;
     
 #if 0  
@@ -242,9 +325,10 @@ static struct usb_driver driver = {
     .id_table       = usb_ids,
     .probe          = ubertooth_probe,
     .disconnect     = ubertooth_disconnect,
-    .pre_reset      = ubertooth_pre_reset,
-    .post_reset     = ubertooth_post_reset,
-    .disable_hub_initiated_lpm = 1,
+//TODO: do I need these?     
+//    .pre_reset      = ubertooth_pre_reset,
+//    .post_reset     = ubertooth_post_reset,
+//    .disable_hub_initiated_lpm = 1, FOR KERNEL 3.8.x
 };
 
 static int __init uberdrv_init(void)
@@ -266,3 +350,8 @@ static void __exit uberdrv_exit(void)
 }
 module_init(uberdrv_init);
 module_exit(uberdrv_exit);
+
+MODULE_AUTHOR("Michael Malyshev");
+MODULE_VERSION("1.0");  
+MODULE_DESCRIPTION("Network interface driver for Ubertooth One USB Bluetoth sniffer");  
+MODULE_LICENSE("GPL");
